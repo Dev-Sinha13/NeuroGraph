@@ -269,6 +269,56 @@ class NeuroGraphPythonTests(unittest.TestCase):
         self.assertEqual(payload["pr_identifier"], "PR-CLI")
         self.assertIn("summary", payload)
 
+    def test_cli_render_report_writes_interactive_html(self) -> None:
+        from neurograph.cli import main
+        import contextlib
+        import io
+        import sys
+
+        project = self._temp_path("render-project")
+        diff_path = project / "change.diff"
+        output_path = project / "review.html"
+        (project / "app.py").write_text(
+            "def run(value):\n    return missing_call(value)\n",
+            encoding="utf-8",
+        )
+        diff_path.write_text(
+            "\n".join(
+                [
+                    "diff --git a/app.py b/app.py",
+                    "--- a/app.py",
+                    "+++ b/app.py",
+                    "@@ -1,1 +1,1 @@",
+                    "-def run(value):",
+                    "+def run(value):",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        stdout = io.StringIO()
+        argv = sys.argv
+        sys.argv = [
+            "neurograph",
+            "render-report",
+            str(project),
+            "--diff-file",
+            str(diff_path),
+            "--pr-id",
+            "PR-RENDER",
+            "--output",
+            str(output_path),
+        ]
+        try:
+            with contextlib.redirect_stdout(stdout):
+                main()
+        finally:
+            sys.argv = argv
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["output"], str(output_path))
+        self.assertTrue(output_path.exists())
+        self.assertIn("NeuroGraph review for PR-RENDER", output_path.read_text(encoding="utf-8"))
+
 
 if __name__ == "__main__":
     unittest.main()
