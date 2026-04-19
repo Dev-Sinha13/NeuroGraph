@@ -1,5 +1,6 @@
 mod errors;
 mod graph;
+mod parser;
 mod rename;
 mod schema;
 mod validator;
@@ -86,6 +87,25 @@ impl PyGraphEngine {
             .map_err(|error| PyValueError::new_err(error.to_string()))
     }
 
+    fn sync_python_project(&mut self, root: String) -> PyResult<String> {
+        let report = self
+            .inner
+            .sync_python_project(&root)
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        serde_json::to_string_pretty(&report)
+            .map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+
+    fn analyze_diff(&self, diff_text: String) -> PyResult<String> {
+        self.inner
+            .analyze_diff(&diff_text)
+            .and_then(|analysis| {
+                serde_json::to_string_pretty(&analysis)
+                    .map_err(|error| ToolCallError::invalid_schema(error.to_string()))
+            })
+            .map_err(raise_tool_error)
+    }
+
     fn deprecate_node(&mut self, node_id: String, payload: String) -> PyResult<String> {
         let metadata = parse_json(&payload, "deprecated_status")?;
         let node = self
@@ -123,6 +143,16 @@ impl PyGraphEngine {
             .get_node_detail(&node_id)
             .and_then(|node| {
                 serde_json::to_string_pretty(&node)
+                    .map_err(|error| ToolCallError::invalid_schema(error.to_string()))
+            })
+            .map_err(raise_tool_error)
+    }
+
+    fn get_unresolved_calls(&self, node_id: String) -> PyResult<String> {
+        self.inner
+            .get_unresolved_calls(&node_id)
+            .and_then(|calls| {
+                serde_json::to_string_pretty(&calls)
                     .map_err(|error| ToolCallError::invalid_schema(error.to_string()))
             })
             .map_err(raise_tool_error)

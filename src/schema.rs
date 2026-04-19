@@ -198,7 +198,7 @@ impl Node {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub enum EdgeKind {
     Calls,
     Imports,
@@ -208,7 +208,7 @@ pub enum EdgeKind {
     RuntimeVerified,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub enum ResolutionMethod {
     Static,
     TypeInferred,
@@ -368,6 +368,46 @@ pub struct SubgraphSummary {
     pub low_confidence_callees: Vec<NodeSummary>,
     pub truncated: bool,
     pub omitted_count: Option<usize>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ChangedNode {
+    pub id: NodeId,
+    pub fqn: String,
+    pub file_path: String,
+    pub start_line: u32,
+    pub end_line: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DiffFileSummary {
+    pub file_path: String,
+    pub added_lines: Vec<u32>,
+    pub removed_lines: Vec<u32>,
+    pub added_symbols: Vec<String>,
+    pub deleted_symbols: Vec<String>,
+    pub changed_nodes: Vec<ChangedNode>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DiffAnalysis {
+    pub changed_files: Vec<DiffFileSummary>,
+    pub changed_node_ids: Vec<NodeId>,
+    pub deleted_symbols: Vec<String>,
+    pub added_symbols: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SyncReport {
+    pub root: String,
+    pub version: GraphVersion,
+    pub scanned_files: usize,
+    pub active_nodes: usize,
+    pub deprecated_nodes: usize,
+    pub garbage_collected_nodes: usize,
+    pub renamed_nodes: Vec<crate::rename::RenameCandidate>,
+    pub unresolved_deprecations: Vec<String>,
+    pub warnings: Vec<String>,
 }
 
 #[cfg(test)]
