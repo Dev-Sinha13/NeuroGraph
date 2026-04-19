@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+*.pyd
+.pytest_cache/
+.venv/
+.tmp/
+.tmp-tests/
+.tools/
+dist/
+build/
+target/
+.mypy_cache/
+neurograph_engine.pyd

@@ -1,0 +1,22 @@
+[build-system]
+requires = ["maturin>=1.8,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "neurograph"
+version = "0.1.0"
+description = "Hybrid Rust and Python code review graph engine"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [{ name = "Dev Sinha" }]
+dependencies = []
+
+[project.scripts]
+neurograph = "neurograph.cli:main"
+
+[tool.maturin]
+python-source = "python"
+module-name = "neurograph_engine"
+features = ["pyo3/extension-module"]
+

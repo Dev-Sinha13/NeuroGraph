@@ -1,0 +1,22 @@
+[package]
+name = "neurograph_engine"
+version = "0.1.0"
+edition = "2024"
+description = "Rust graph engine for the NeuroGraph reviewer"
+license = "MIT"
+
+[lib]
+name = "neurograph_engine"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+hex = "0.4"
+pyo3 = { version = "0.24", features = ["extension-module", "abi3-py39"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+thiserror = "2.0"
+
+[dev-dependencies]
+pretty_assertions = "1.4"
+
