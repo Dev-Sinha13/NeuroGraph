@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::path::Path;
 use std::sync::OnceLock;
 
@@ -9,8 +10,8 @@ use crate::parser::scan_python_project;
 use crate::rename::RenameCandidate;
 use crate::schema::{
     ChangedNode, ConfidenceConfig, DeprecatedMetadata, DeprecationReason, DiffAnalysis,
-    DiffFileSummary, Edge, EdgeDraft, GraphSnapshot, GraphVersion, Node, NodeId, NodeStatus,
-    NodeSummary, SubgraphSummary, SyncReport,
+    DiffFileSummary, Edge, EdgeDraft, GraphSnapshot, GraphState, GraphVersion, Node, NodeId,
+    NodeStatus, NodeSummary, OverlayReview, SubgraphSummary, SyncReport,
 };
 use crate::validator::SchemaValidator;
 
@@ -48,6 +49,85 @@ impl GraphEngine {
 
     pub fn current_version(&self) -> GraphVersion {
         self.current_version
+    }
+
+    pub fn export_state(&self) -> GraphState {
+        let mut nodes: Vec<Node> = self.nodes.values().cloned().collect();
+        nodes.sort_by(|left, right| left.id.as_str().cmp(right.id.as_str()));
+
+        let mut edges = self.edges.clone();
+        edges.sort_by(|left, right| {
+            (
+                left.source.as_str(),
+                left.target.as_str(),
+                edge_kind_key(left.kind),
+                resolution_key(left.resolution),
+                left.confidence().to_bits(),
+            )
+                .cmp(&(
+                    right.source.as_str(),
+                    right.target.as_str(),
+                    edge_kind_key(right.kind),
+                    resolution_key(right.resolution),
+                    right.confidence().to_bits(),
+                ))
+        });
+
+        let mut unresolved_calls: Vec<(NodeId, Vec<String>)> = self
+            .unresolved_calls
+            .iter()
+            .map(|(node_id, calls)| {
+                let mut ordered_calls = calls.clone();
+                ordered_calls.sort();
+                (node_id.clone(), ordered_calls)
+            })
+            .collect();
+        unresolved_calls.sort_by(|left, right| left.0.as_str().cmp(right.0.as_str()));
+
+        GraphState {
+            current_version: self.current_version,
+            confidence_config: self.validator.confidence_config().clone(),
+            nodes,
+            edges,
+            unresolved_calls,
+        }
+    }
+
+    pub fn import_state(&mut self, state: GraphState) -> Result<(), SchemaError> {
+        self.current_version = state.current_version;
+        self.validator
+            .set_confidence_config(state.confidence_config);
+        self.nodes = state
+            .nodes
+            .into_iter()
+            .map(|node| {
+                node.validate()
+                    .map(|validated| (validated.id.clone(), validated))
+            })
+            .collect::<Result<HashMap<_, _>, _>>()?;
+        self.edges = state.edges;
+        self.unresolved_calls = state.unresolved_calls.into_iter().collect();
+        self.deleted_in_overlay.clear();
+        self.rebuild_indexes();
+        Ok(())
+    }
+
+    pub fn save_to_path(&self, path: &Path) -> Result<(), String> {
+        let state = self.export_state();
+        let payload = serde_json::to_string_pretty(&state).map_err(|error| error.to_string())?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
+        fs::write(path, payload).map_err(|error| error.to_string())
+    }
+
+    pub fn load_from_path(&mut self, path: &Path) -> Result<GraphState, String> {
+        let payload = fs::read_to_string(path).map_err(|error| error.to_string())?;
+        let state: GraphState =
+            serde_json::from_str(&payload).map_err(|error| error.to_string())?;
+        self.import_state(state.clone())
+            .map_err(|error| error.to_string())?;
+        Ok(state)
     }
 
     pub fn increment_version(&mut self) -> GraphVersion {
@@ -296,6 +376,36 @@ impl GraphEngine {
         })
     }
 
+    pub fn create_overlay_review(
+        &self,
+        pr_identifier: String,
+        diff_text: &str,
+    ) -> Result<OverlayReview, ToolCallError> {
+        let diff_analysis = self.analyze_diff(diff_text)?;
+        let deleted_node_ids = self.overlay_deleted_node_ids(&diff_analysis);
+        let deleted_set: HashSet<NodeId> = deleted_node_ids.iter().cloned().collect();
+        let mut warnings = Vec::new();
+        if diff_analysis.changed_node_ids.is_empty() {
+            warnings.push(
+                "The overlay could not map any changed active nodes from the supplied diff."
+                    .to_string(),
+            );
+        }
+        if !deleted_set.is_empty() {
+            warnings.push(format!(
+                "The overlay marks {} baseline nodes as deleted in the PR view.",
+                deleted_set.len()
+            ));
+        }
+
+        Ok(OverlayReview {
+            snapshot: self.create_snapshot(pr_identifier),
+            diff_analysis,
+            deleted_node_ids,
+            warnings,
+        })
+    }
+
     pub fn deprecate_node(
         &mut self,
         node_id: &str,
@@ -373,15 +483,16 @@ impl GraphEngine {
     }
 
     pub fn get_node_detail(&self, node_id: &str) -> Result<Node, ToolCallError> {
-        let node = self.resolve_node_or_error(node_id)?;
-        if self.deleted_in_overlay.contains(&node.id) {
-            return Err(ToolCallError::NodeDeletedInPr {
-                fqn: node.fqn.clone(),
-                suggestion: "Flag callers of this node as potentially broken by the PR."
-                    .to_string(),
-            });
-        }
-        Ok(node.clone())
+        self.get_node_detail_with_deleted(node_id, &self.deleted_in_overlay)
+    }
+
+    pub fn get_overlay_node_detail(
+        &self,
+        overlay: &OverlayReview,
+        node_id: &str,
+    ) -> Result<Node, ToolCallError> {
+        let deleted: HashSet<NodeId> = overlay.deleted_node_ids.iter().cloned().collect();
+        self.get_node_detail_with_deleted(node_id, &deleted)
     }
 
     pub fn get_unresolved_calls(&self, node_id: &str) -> Result<Vec<String>, ToolCallError> {
@@ -399,6 +510,37 @@ impl GraphEngine {
         escalation_confidence_threshold: f32,
         max_nodes: usize,
     ) -> Result<SubgraphSummary, ToolCallError> {
+        self.get_subgraph_internal(
+            node_id,
+            escalation_confidence_threshold,
+            max_nodes,
+            &self.deleted_in_overlay,
+        )
+    }
+
+    pub fn get_overlay_subgraph(
+        &self,
+        overlay: &OverlayReview,
+        node_id: &str,
+        escalation_confidence_threshold: f32,
+        max_nodes: usize,
+    ) -> Result<SubgraphSummary, ToolCallError> {
+        let deleted: HashSet<NodeId> = overlay.deleted_node_ids.iter().cloned().collect();
+        self.get_subgraph_internal(
+            node_id,
+            escalation_confidence_threshold,
+            max_nodes,
+            &deleted,
+        )
+    }
+
+    fn get_subgraph_internal(
+        &self,
+        node_id: &str,
+        escalation_confidence_threshold: f32,
+        max_nodes: usize,
+        deleted_overlay_nodes: &HashSet<NodeId>,
+    ) -> Result<SubgraphSummary, ToolCallError> {
         if max_nodes == 0 {
             return Err(ToolCallError::invalid_schema(
                 "max_nodes must be at least 1".to_string(),
@@ -411,6 +553,13 @@ impl GraphEngine {
         }
 
         let queried_node = self.resolve_node_or_error(node_id)?;
+        if deleted_overlay_nodes.contains(&queried_node.id) {
+            return Err(ToolCallError::NodeDeletedInPr {
+                fqn: queried_node.fqn.clone(),
+                suggestion: "Flag callers of this node as broken and inspect the overlay diff."
+                    .to_string(),
+            });
+        }
 
         let mut callers = Vec::new();
         let mut callees = Vec::new();
@@ -419,7 +568,7 @@ impl GraphEngine {
             if edge.target == queried_node.id {
                 if let Some(source_node) = self.nodes.get(&edge.source) {
                     callers.push((
-                        summary_for(source_node, edge),
+                        summary_for(source_node, edge, deleted_overlay_nodes),
                         edge.requires_escalation(escalation_confidence_threshold),
                     ));
                 }
@@ -427,7 +576,7 @@ impl GraphEngine {
             if edge.source == queried_node.id {
                 if let Some(target_node) = self.nodes.get(&edge.target) {
                     callees.push((
-                        summary_for(target_node, edge),
+                        summary_for(target_node, edge, deleted_overlay_nodes),
                         edge.requires_escalation(escalation_confidence_threshold),
                     ));
                 }
@@ -505,6 +654,22 @@ impl GraphEngine {
             })
     }
 
+    fn get_node_detail_with_deleted(
+        &self,
+        node_id: &str,
+        deleted_overlay_nodes: &HashSet<NodeId>,
+    ) -> Result<Node, ToolCallError> {
+        let node = self.resolve_node_or_error(node_id)?;
+        if deleted_overlay_nodes.contains(&node.id) {
+            return Err(ToolCallError::NodeDeletedInPr {
+                fqn: node.fqn.clone(),
+                suggestion: "Flag callers of this node as potentially broken by the PR."
+                    .to_string(),
+            });
+        }
+        Ok(node.clone())
+    }
+
     fn next_sync_version(&self) -> GraphVersion {
         if self.nodes.is_empty() && self.current_version == GraphVersion::initial() {
             self.current_version
@@ -565,6 +730,38 @@ impl GraphEngine {
                 .push(node.id.clone());
         }
     }
+
+    fn overlay_deleted_node_ids(&self, diff_analysis: &DiffAnalysis) -> Vec<NodeId> {
+        let mut deleted = Vec::new();
+        let mut seen = HashSet::new();
+        for file_summary in &diff_analysis.changed_files {
+            let deleted_symbols: HashSet<String> = file_summary
+                .deleted_symbols
+                .iter()
+                .map(|symbol| symbol.rsplit('.').next().unwrap_or(symbol).to_string())
+                .collect();
+            let added_symbols: HashSet<String> = file_summary
+                .added_symbols
+                .iter()
+                .map(|symbol| symbol.rsplit('.').next().unwrap_or(symbol).to_string())
+                .collect();
+            if let Some(node_ids) = self.file_index.get(&file_summary.file_path) {
+                for node_id in node_ids {
+                    let Some(node) = self.nodes.get(node_id) else {
+                        continue;
+                    };
+                    let short_name = node.name.clone();
+                    if deleted_symbols.contains(&short_name)
+                        && !added_symbols.contains(&short_name)
+                        && seen.insert(node.id.clone())
+                    {
+                        deleted.push(node.id.clone());
+                    }
+                }
+            }
+        }
+        deleted
+    }
 }
 
 fn deprecated_copy(
@@ -593,14 +790,34 @@ fn node_semantically_equal(existing: &Node, next: &Node) -> bool {
         && existing.body_hash == next.body_hash
 }
 
-fn summary_for(node: &Node, edge: &Edge) -> NodeSummary {
+fn summary_for(node: &Node, edge: &Edge, deleted_overlay_nodes: &HashSet<NodeId>) -> NodeSummary {
     NodeSummary {
         id: node.id.clone(),
         fqn: node.fqn.clone(),
         kind: node.kind.clone(),
         confidence: edge.confidence(),
         resolution: edge.resolution,
-        source_available: !node.status.is_deprecated(),
+        source_available: !node.status.is_deprecated() && !deleted_overlay_nodes.contains(&node.id),
+    }
+}
+
+fn edge_kind_key(kind: crate::schema::EdgeKind) -> u8 {
+    match kind {
+        crate::schema::EdgeKind::Calls => 0,
+        crate::schema::EdgeKind::Imports => 1,
+        crate::schema::EdgeKind::Inherits => 2,
+        crate::schema::EdgeKind::Implements => 3,
+        crate::schema::EdgeKind::Instantiates => 4,
+        crate::schema::EdgeKind::RuntimeVerified => 5,
+    }
+}
+
+fn resolution_key(method: crate::schema::ResolutionMethod) -> u8 {
+    match method {
+        crate::schema::ResolutionMethod::Static => 0,
+        crate::schema::ResolutionMethod::TypeInferred => 1,
+        crate::schema::ResolutionMethod::Heuristic => 2,
+        crate::schema::ResolutionMethod::Runtime => 3,
     }
 }
 
@@ -878,5 +1095,74 @@ def format_result(value):
         assert_eq!(analysis.changed_files.len(), 1);
         assert_eq!(analysis.changed_node_ids.len(), 1);
         assert_eq!(analysis.changed_files[0].file_path, "app.py");
+    }
+
+    #[test]
+    fn graph_state_round_trips_through_disk_persistence() {
+        let temp_dir = TempDir::new().unwrap();
+        write_project(
+            &temp_dir,
+            &[(
+                "app.py",
+                "def run(value):\n    return helper(value)\n\ndef helper(value):\n    return value\n",
+            )],
+        );
+        let path = temp_dir.path().join("baseline.json");
+
+        let mut engine = GraphEngine::new(ConfidenceConfig::default());
+        engine
+            .sync_python_project(temp_dir.path().to_string_lossy().as_ref())
+            .unwrap();
+        let original_state = engine.export_state();
+        engine.save_to_path(&path).unwrap();
+
+        let mut loaded = GraphEngine::new(ConfidenceConfig::default());
+        let loaded_state = loaded.load_from_path(&path).unwrap();
+        assert_eq!(loaded_state, original_state);
+        assert_eq!(loaded.export_state(), original_state);
+    }
+
+    #[test]
+    fn overlay_review_marks_deleted_nodes_as_pr_removed() {
+        let temp_dir = TempDir::new().unwrap();
+        write_project(
+            &temp_dir,
+            &[(
+                "app.py",
+                "def run(value):\n    return helper(value)\n\ndef helper(value):\n    return value\n",
+            )],
+        );
+        let mut engine = GraphEngine::new(ConfidenceConfig::default());
+        engine
+            .sync_python_project(temp_dir.path().to_string_lossy().as_ref())
+            .unwrap();
+
+        let diff = r#"diff --git a/app.py b/app.py
+--- a/app.py
++++ b/app.py
+@@ -1,4 +1,2 @@
+ def run(value):
+-    return helper(value)
++    return value
+-
+-def helper(value):
+-    return value
+"#;
+        let overlay = engine
+            .create_overlay_review("PR-delete-helper".to_string(), diff)
+            .unwrap();
+        let helper_id = engine
+            .nodes
+            .values()
+            .find(|node| node.fqn == "app.helper")
+            .unwrap()
+            .id
+            .clone();
+
+        assert!(overlay.deleted_node_ids.contains(&helper_id));
+        assert!(matches!(
+            engine.get_overlay_node_detail(&overlay, helper_id.as_str()),
+            Err(ToolCallError::NodeDeletedInPr { .. })
+        ));
     }
 }

@@ -8,7 +8,7 @@ from .review import ReviewReport
 
 def render_review_report_html(report: ReviewReport) -> str:
     payload = json.dumps(report.to_dict())
-    escaped_title = html.escape(f"NeuroGraph Review · {report.pr_identifier}")
+    escaped_title = html.escape(f"NeuroGraph Review - {report.pr_identifier}")
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -40,7 +40,7 @@ def render_review_report_html(report: ReviewReport) -> str:
         linear-gradient(180deg, #f8f2e7 0%, #efe4d1 100%);
     }}
     .shell {{
-      width: min(1400px, calc(100vw - 32px));
+      width: min(1420px, calc(100vw - 32px));
       margin: 24px auto;
       display: grid;
       grid-template-columns: 340px 1fr;
@@ -63,10 +63,10 @@ def render_review_report_html(report: ReviewReport) -> str:
       line-height: 0.94;
       font-family: var(--font-display);
       letter-spacing: -0.03em;
-      max-width: 780px;
+      max-width: 820px;
     }}
     .hero p {{
-      max-width: 780px;
+      max-width: 820px;
       margin: 0;
       font-size: 1.05rem;
       line-height: 1.6;
@@ -136,6 +136,29 @@ def render_review_report_html(report: ReviewReport) -> str:
       margin: 0;
       color: rgba(19, 33, 44, 0.8);
       line-height: 1.6;
+    }}
+    .status-stack {{
+      display: grid;
+      gap: 12px;
+    }}
+    .status-card {{
+      border-radius: 18px;
+      padding: 14px 16px;
+      background: rgba(255, 255, 255, 0.58);
+      border: 1px solid var(--line);
+    }}
+    .status-card strong {{
+      display: block;
+      margin-bottom: 6px;
+      font-size: 0.9rem;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }}
+    .status-card p {{
+      margin: 0;
+      line-height: 1.55;
+      color: rgba(19, 33, 44, 0.8);
+      overflow-wrap: anywhere;
     }}
     .main {{
       display: grid;
@@ -225,10 +248,14 @@ def render_review_report_html(report: ReviewReport) -> str:
   <div class="shell">
     <section class="hero">
       <h1>NeuroGraph review for {html.escape(report.pr_identifier)}</h1>
-      <p>Interactive review output generated from the live Rust graph engine. Filter the findings, inspect changed files, and read the evidence without leaving the report.</p>
+      <p>Interactive review output generated from the Rust graph engine and a cached baseline overlay. Filter findings, inspect changed files, and keep the snapshot state in view while you assess impact.</p>
       <div class="stats" id="stats"></div>
     </section>
     <aside class="sidebar">
+      <div class="control">
+        <h2>Snapshot</h2>
+        <div class="status-stack" id="snapshot-status"></div>
+      </div>
       <div class="control">
         <h2>Search</h2>
         <input class="search" id="search" type="search" placeholder="Filter findings by title, file, node, or evidence">
@@ -275,6 +302,7 @@ def render_review_report_html(report: ReviewReport) -> str:
     const severityFiltersEl = document.getElementById('severity-filters');
     const fileFiltersEl = document.getElementById('file-filters');
     const warningBulletsEl = document.getElementById('warning-bullets');
+    const snapshotStatusEl = document.getElementById('snapshot-status');
     const findingListEl = document.getElementById('finding-list');
     const findingDetailEl = document.getElementById('finding-detail');
     const fileListEl = document.getElementById('file-list');
@@ -319,6 +347,9 @@ def render_review_report_html(report: ReviewReport) -> str:
         ['Changed nodes', report.summary.changed_nodes],
         ['Findings', report.summary.findings],
         ['Warnings', report.warnings.length],
+        ['Overlay deletions', report.overlay.deleted_node_ids.length],
+        ['Baseline version', report.snapshot.baseline_version],
+        ['Live baseline', report.snapshot.current_baseline_version],
       ];
       statsEl.innerHTML = '';
       for (const [label, value] of items) {{
@@ -329,6 +360,39 @@ def render_review_report_html(report: ReviewReport) -> str:
       }}
     }}
 
+    function renderSnapshotStatus() {{
+      const snapshotCards = [
+        {{
+          title: report.snapshot_stale ? 'Stale overlay' : 'Fresh overlay',
+          body: report.snapshot_stale
+            ? 'The live baseline advanced after this overlay was created. Treat deleted-node context and deprecation links with extra care.'
+            : 'The review snapshot is aligned with the latest baseline known to this report.'
+        }},
+        {{
+          title: 'Version pair',
+          body: `Baseline ${{report.snapshot.baseline_version}} to live ${{report.snapshot.current_baseline_version}} for ${{report.snapshot.pr_identifier}}.`
+        }},
+        {{
+          title: 'Baseline cache',
+          body: report.baseline_cache_path
+        }},
+        {{
+          title: 'Overlay deletions',
+          body: report.overlay.deleted_node_ids.length
+            ? `${{report.overlay.deleted_node_ids.length}} baseline nodes are hidden in the PR overlay view.`
+            : 'No baseline nodes are hidden in the PR overlay view.'
+        }},
+      ];
+
+      snapshotStatusEl.innerHTML = '';
+      for (const item of snapshotCards) {{
+        const card = document.createElement('div');
+        card.className = 'status-card';
+        card.innerHTML = `<strong>${{escapeHtml(item.title)}}</strong><p>${{escapeHtml(item.body)}}</p>`;
+        snapshotStatusEl.appendChild(card);
+      }}
+    }}
+
     function renderFilters() {{
       severityFiltersEl.innerHTML = '';
       for (const severity of severityOrder) {{
@@ -336,7 +400,7 @@ def render_review_report_html(report: ReviewReport) -> str:
           ? report.findings.length
           : report.findings.filter((finding) => finding.severity === severity).length;
         severityFiltersEl.appendChild(
-          createChip(`${{severity.toUpperCase()}} · ${{count}}`, state.severity === severity, () => {{
+          createChip(`${{severity.toUpperCase()}} - ${{count}}`, state.severity === severity, () => {{
             state.severity = severity;
             render();
           }})
@@ -447,6 +511,7 @@ def render_review_report_html(report: ReviewReport) -> str:
     }}
 
     function render() {{
+      renderSnapshotStatus();
       renderFilters();
       renderWarnings();
       renderFindings();

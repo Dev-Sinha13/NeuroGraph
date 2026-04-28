@@ -410,6 +410,23 @@ pub struct SyncReport {
     pub warnings: Vec<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GraphState {
+    pub current_version: GraphVersion,
+    pub confidence_config: ConfidenceConfig,
+    pub nodes: Vec<Node>,
+    pub edges: Vec<Edge>,
+    pub unresolved_calls: Vec<(NodeId, Vec<String>)>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct OverlayReview {
+    pub snapshot: GraphSnapshot,
+    pub diff_analysis: DiffAnalysis,
+    pub deleted_node_ids: Vec<NodeId>,
+    pub warnings: Vec<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

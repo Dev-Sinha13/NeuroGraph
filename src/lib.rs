@@ -11,7 +11,7 @@ use serde::de::DeserializeOwned;
 
 use crate::errors::ToolCallError;
 use crate::graph::GraphEngine;
-use crate::schema::{ConfidenceConfig, EdgeDraft, GraphSnapshot, Node};
+use crate::schema::{ConfidenceConfig, EdgeDraft, GraphSnapshot, Node, OverlayReview};
 
 #[pyclass(name = "GraphEngine")]
 struct PyGraphEngine {
@@ -96,11 +96,36 @@ impl PyGraphEngine {
             .map_err(|error| PyValueError::new_err(error.to_string()))
     }
 
+    fn save_graph_state(&self, path: String) -> PyResult<()> {
+        self.inner
+            .save_to_path(std::path::Path::new(&path))
+            .map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+
+    fn load_graph_state(&mut self, path: String) -> PyResult<String> {
+        self.inner
+            .load_from_path(std::path::Path::new(&path))
+            .and_then(|state| {
+                serde_json::to_string_pretty(&state).map_err(|error| error.to_string())
+            })
+            .map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+
     fn analyze_diff(&self, diff_text: String) -> PyResult<String> {
         self.inner
             .analyze_diff(&diff_text)
             .and_then(|analysis| {
                 serde_json::to_string_pretty(&analysis)
+                    .map_err(|error| ToolCallError::invalid_schema(error.to_string()))
+            })
+            .map_err(raise_tool_error)
+    }
+
+    fn create_overlay_review(&self, pr_identifier: String, diff_text: String) -> PyResult<String> {
+        self.inner
+            .create_overlay_review(pr_identifier, &diff_text)
+            .and_then(|overlay| {
+                serde_json::to_string_pretty(&overlay)
                     .map_err(|error| ToolCallError::invalid_schema(error.to_string()))
             })
             .map_err(raise_tool_error)
@@ -138,9 +163,47 @@ impl PyGraphEngine {
             .map_err(raise_tool_error)
     }
 
+    #[pyo3(signature = (overlay_payload, node_id, escalation_confidence_threshold, max_nodes = 25))]
+    fn get_overlay_subgraph(
+        &self,
+        overlay_payload: String,
+        node_id: String,
+        escalation_confidence_threshold: f32,
+        max_nodes: usize,
+    ) -> PyResult<String> {
+        let overlay = parse_json::<OverlayReview>(&overlay_payload, "overlay_review")?;
+        self.inner
+            .get_overlay_subgraph(
+                &overlay,
+                &node_id,
+                escalation_confidence_threshold,
+                max_nodes,
+            )
+            .and_then(|summary| {
+                serde_json::to_string_pretty(&summary)
+                    .map_err(|error| ToolCallError::invalid_schema(error.to_string()))
+            })
+            .map_err(raise_tool_error)
+    }
+
     fn get_node_detail(&self, node_id: String) -> PyResult<String> {
         self.inner
             .get_node_detail(&node_id)
+            .and_then(|node| {
+                serde_json::to_string_pretty(&node)
+                    .map_err(|error| ToolCallError::invalid_schema(error.to_string()))
+            })
+            .map_err(raise_tool_error)
+    }
+
+    fn get_overlay_node_detail(
+        &self,
+        overlay_payload: String,
+        node_id: String,
+    ) -> PyResult<String> {
+        let overlay = parse_json::<OverlayReview>(&overlay_payload, "overlay_review")?;
+        self.inner
+            .get_overlay_node_detail(&overlay, &node_id)
             .and_then(|node| {
                 serde_json::to_string_pretty(&node)
                     .map_err(|error| ToolCallError::invalid_schema(error.to_string()))

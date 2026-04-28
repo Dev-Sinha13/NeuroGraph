@@ -28,7 +28,11 @@ class ReviewFinding:
 class ReviewReport:
     pr_identifier: str
     project_root: str
+    baseline_cache_path: str
     graph_version: int
+    snapshot: dict[str, Any]
+    snapshot_stale: bool
+    overlay: dict[str, Any]
     sync_report: dict[str, Any]
     diff_analysis: dict[str, Any]
     findings: list[ReviewFinding]
@@ -39,7 +43,11 @@ class ReviewReport:
         return {
             "pr_identifier": self.pr_identifier,
             "project_root": self.project_root,
+            "baseline_cache_path": self.baseline_cache_path,
             "graph_version": self.graph_version,
+            "snapshot": self.snapshot,
+            "snapshot_stale": self.snapshot_stale,
+            "overlay": self.overlay,
             "sync_report": self.sync_report,
             "diff_analysis": self.diff_analysis,
             "findings": [dataclasses.asdict(finding) for finding in self.findings],
@@ -56,24 +64,66 @@ class ReviewRunner:
         self,
         engine: EngineBridge | None = None,
         routing_config: RoutingConfig | None = None,
+        baseline_cache_name: str = "baseline.json",
     ) -> None:
         self.engine = engine or EngineBridge.create()
         self.routing_config = routing_config or RoutingConfig()
+        self.baseline_cache_name = baseline_cache_name
 
     def run(self, project_root: Path, diff_text: str, pr_identifier: str) -> ReviewReport:
-        sync_report = self.engine.sync_python_project(str(project_root))
-        diff_analysis = self.engine.analyze_diff(diff_text)
+        cache_dir = project_root / ".neurograph"
+        cache_path = cache_dir / self.baseline_cache_name
+        cache_dir.mkdir(exist_ok=True)
+
+        baseline_loaded = cache_path.exists()
+        if baseline_loaded:
+            self.engine.load_graph_state(str(cache_path))
+            sync_report: dict[str, Any] | None = None
+        else:
+            sync_report = self.engine.sync_python_project(str(project_root))
+            self.engine.save_graph_state(str(cache_path))
+
+        overlay = self.engine.create_overlay_review(pr_identifier, diff_text)
+        snapshot = overlay["snapshot"]
+        diff_analysis = overlay["diff_analysis"]
+
+        if baseline_loaded:
+            live_engine = EngineBridge.create(self.engine.confidence_config())
+            live_engine.load_graph_state(str(cache_path))
+            sync_report = live_engine.sync_python_project(str(project_root))
+            live_engine.save_graph_state(str(cache_path))
+            snapshot = live_engine.snapshot_with_live_version(snapshot, sync_report["version"])
+            snapshot_stale = live_engine.snapshot_is_stale(snapshot, sync_report["version"])
+        else:
+            if sync_report is None:
+                raise RuntimeError("sync_report must exist after initial baseline creation")
+            snapshot = self.engine.snapshot_with_live_version(snapshot, sync_report["version"])
+            snapshot_stale = False
+
+        overlay["snapshot"] = snapshot
+
         warnings = validate_routing_config(
             self.routing_config, self.engine.confidence_config()
         )
         startup_warning = self.engine.startup_warning()
         if startup_warning:
             warnings.append(startup_warning)
+        if baseline_loaded:
+            warnings.append(f"Loaded cached baseline graph from {cache_path}.")
+        else:
+            warnings.append(
+                f"No cached baseline graph existed. A fresh baseline was created at {cache_path}."
+            )
         warnings.extend(sync_report.get("warnings", []))
+        warnings.extend(overlay.get("warnings", []))
         warnings.extend(
             f"Deprecated node still unresolved after sync: {fqn}"
             for fqn in sync_report.get("unresolved_deprecations", [])
         )
+        if snapshot_stale:
+            warnings.append(
+                "The cached overlay baseline is stale compared with the live baseline sync. Some deprecated nodes may already be garbage collected."
+            )
         if not diff_analysis.get("changed_node_ids"):
             warnings.append(
                 "The diff did not map to any active nodes. Review coverage is limited to file-level symbols."
@@ -84,8 +134,38 @@ class ReviewRunner:
             symbol.rsplit(".", 1)[-1] for symbol in diff_analysis.get("deleted_symbols", [])
         }
         for index, node_id in enumerate(diff_analysis.get("changed_node_ids", []), start=1):
-            detail = self.engine.get_node_detail(node_id)
-            summary = self.engine.get_subgraph(
+            try:
+                detail = self.engine.get_overlay_node_detail(overlay, node_id)
+            except ValueError as error:
+                try:
+                    payload = json.loads(str(error))
+                except json.JSONDecodeError:
+                    raise
+                if payload.get("error") != "NODE_DELETED_IN_PR":
+                    raise
+
+                baseline_detail = self.engine.get_node_detail(node_id)
+                findings.append(
+                    ReviewFinding(
+                        id=f"finding-{index}-deleted-in-pr",
+                        severity="high",
+                        title="Baseline node removed in the PR overlay",
+                        summary=payload["detail"],
+                        recommendation=payload["suggestion"],
+                        kind="node-deleted-in-pr",
+                        file_path=baseline_detail["file_path"],
+                        node_fqn=baseline_detail["fqn"],
+                        confidence=0.95,
+                        evidence=[
+                            f"Overlay deleted node id: {node_id}",
+                            f"Deleted symbols in diff: {', '.join(sorted(deleted_symbols)) or 'none'}",
+                        ],
+                    )
+                )
+                continue
+
+            summary = self.engine.get_overlay_subgraph(
+                overlay,
                 node_id,
                 self.routing_config.escalation_confidence_threshold,
             )
@@ -217,7 +297,11 @@ class ReviewRunner:
         return ReviewReport(
             pr_identifier=pr_identifier,
             project_root=str(project_root),
+            baseline_cache_path=str(cache_path),
             graph_version=sync_report["version"],
+            snapshot=snapshot,
+            snapshot_stale=snapshot_stale,
+            overlay=overlay,
             sync_report=sync_report,
             diff_analysis=diff_analysis,
             findings=sort_findings(findings),

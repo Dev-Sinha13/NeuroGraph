@@ -44,8 +44,17 @@ class EngineBridge:
     def sync_python_project(self, root: str) -> dict[str, Any]:
         return json.loads(self._engine.sync_python_project(root))
 
+    def save_graph_state(self, path: str) -> None:
+        self._engine.save_graph_state(path)
+
+    def load_graph_state(self, path: str) -> dict[str, Any]:
+        return json.loads(self._engine.load_graph_state(path))
+
     def analyze_diff(self, diff_text: str) -> dict[str, Any]:
         return json.loads(self._engine.analyze_diff(diff_text))
+
+    def create_overlay_review(self, pr_identifier: str, diff_text: str) -> dict[str, Any]:
+        return json.loads(self._engine.create_overlay_review(pr_identifier, diff_text))
 
     def deprecate_node(self, node_id: str, deprecated_status: dict[str, Any]) -> dict[str, Any]:
         return json.loads(self._engine.deprecate_node(node_id, json.dumps(deprecated_status)))
@@ -62,8 +71,26 @@ class EngineBridge:
         payload = self._engine.get_subgraph(node_id, escalation_confidence_threshold, max_nodes)
         return SubgraphSummary.from_dict(json.loads(payload))
 
+    def get_overlay_subgraph(
+        self,
+        overlay: dict[str, Any],
+        node_id: str,
+        escalation_confidence_threshold: float,
+        max_nodes: int = 25,
+    ) -> SubgraphSummary:
+        payload = self._engine.get_overlay_subgraph(
+            json.dumps(overlay),
+            node_id,
+            escalation_confidence_threshold,
+            max_nodes,
+        )
+        return SubgraphSummary.from_dict(json.loads(payload))
+
     def get_node_detail(self, node_id: str) -> dict[str, Any]:
         return json.loads(self._engine.get_node_detail(node_id))
+
+    def get_overlay_node_detail(self, overlay: dict[str, Any], node_id: str) -> dict[str, Any]:
+        return json.loads(self._engine.get_overlay_node_detail(json.dumps(overlay), node_id))
 
     def get_unresolved_calls(self, node_id: str) -> list[str]:
         return json.loads(self._engine.get_unresolved_calls(node_id))

@@ -70,8 +70,8 @@ neurograph validate-config confidence.json
 - `SchemaValidator` is the gatekeeper for every edge write. Type-inferred and heuristic confidence checks live there so runtime calibration data never gets hardcoded into constructors.
 - `GraphSnapshot.is_stale()` and rename auto-accept thresholds are implemented and tested.
 - Tool-call failures produce structured JSON payloads that the Python state machine can append directly into LLM context.
-- The Rust engine can now scan Python projects directly, build a graph, detect unresolved calls, diff-map changed nodes, and produce review-ready sync metadata.
-- The Python review runner emits findings from real engine output and can render a polished interactive report without a web build step.
+- The Rust engine can now scan Python projects directly, build a graph, persist and reload baseline state, detect unresolved calls, diff-map changed nodes, and produce review-ready sync metadata.
+- The Python review runner uses a cached baseline in `.neurograph/baseline.json`, creates overlay reviews against that snapshot, refreshes the live baseline after review, and can render a polished interactive report without a web build step.
 
 ## CLI
 
@@ -83,6 +83,8 @@ The current CLI focuses on the pieces defined by the schema:
 - `neurograph render-report <project-root> --diff-file <diff.txt> --pr-id <id> --output <report.html>`
 
 The fixture-based `review` command is still useful for state-machine testing. The product path is `review-project`, which runs the real Rust-backed sync and diff pipeline, then emits a structured JSON report. `render-report` turns that same report into a responsive, filterable HTML artifact you can open locally.
+
+The first `review-project` run creates a cached baseline at `.neurograph/baseline.json`. Later runs load that baseline, build the PR overlay against it, then advance the live baseline and write it back to the same cache. Reports include the baseline cache path, snapshot version pair, overlay deletion count, and a stale-overlay warning when the live baseline has advanced beyond the snapshot used for the overlay.
 
 ## Current analysis scope
 

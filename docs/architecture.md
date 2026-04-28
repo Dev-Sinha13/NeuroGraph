@@ -21,9 +21,10 @@ The implemented end-to-end flow is:
 1. The Rust engine scans a Python project root and extracts module, class, function, and method nodes.
 2. The same sync pass resolves internal imports and direct call/instantiation edges, while recording unresolved calls instead of fabricating certainty.
 3. Incremental sync deprecates disappeared nodes, auto-accepts high-confidence renames, reroutes inbound edges, and garbage-collects expired deprecated nodes.
-4. A Rust diff analyzer maps unified diff hunks back onto active nodes and file summaries.
-5. The Python review runner combines sync output, diff analysis, routing warnings, and subgraph queries into findings.
-6. The reporting layer renders the review into a standalone interactive HTML artifact with filters, search, summaries, and evidence panels.
+4. The baseline graph can be serialized to disk and reloaded, which lets the Python layer keep a durable cached baseline at `.neurograph/baseline.json`.
+5. A Rust diff analyzer maps unified diff hunks back onto active nodes and file summaries, and an overlay review can hide baseline nodes deleted by the PR without mutating the stored baseline.
+6. The Python review runner loads the cached baseline, creates an overlay snapshot against it, then syncs the live baseline forward and writes the refreshed baseline back to disk.
+7. The reporting layer renders the review into a standalone interactive HTML artifact with filters, search, summaries, evidence panels, and explicit snapshot status for stale-overlay detection.
 
 ## Practical limitations
 

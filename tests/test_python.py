@@ -119,6 +119,20 @@ class NeuroGraphPythonTests(unittest.TestCase):
         self.assertFalse(self.engine.snapshot_is_stale(snapshot, 1))
         self.assertTrue(self.engine.snapshot_is_stale(snapshot, 2))
 
+    def test_engine_bridge_persists_graph_state_round_trip(self) -> None:
+        project = self._temp_path("bridge-state")
+        state_path = project / "baseline.json"
+        self.engine.save_graph_state(str(state_path))
+
+        loaded = EngineBridge.create()
+        state = loaded.load_graph_state(str(state_path))
+
+        self.assertEqual(state["current_version"], 1)
+        self.assertEqual(len(state["nodes"]), 3)
+        self.assertEqual(len(state["edges"]), 2)
+        summary = loaded.get_subgraph(self.target["id"], 0.7)
+        self.assertEqual(summary.queried_node_fqn, "pkg.target")
+
     def test_agent_session_forces_termination_on_iteration_budget(self) -> None:
         session = AgentSession(
             engine=self.engine,
@@ -177,6 +191,91 @@ class NeuroGraphPythonTests(unittest.TestCase):
             any(finding.kind == "unresolved-calls" for finding in report.findings)
         )
 
+    def test_review_runner_creates_baseline_cache_on_first_run(self) -> None:
+        project = self._temp_path("baseline-project")
+        diff_text = "\n".join(
+            [
+                "diff --git a/app.py b/app.py",
+                "--- a/app.py",
+                "+++ b/app.py",
+                "@@ -1,1 +1,1 @@",
+                "-def run(value):",
+                "+def run(value):",
+            ]
+        )
+        (project / "app.py").write_text("def run(value):\n    return value\n", encoding="utf-8")
+
+        report = ReviewRunner().run(project, diff_text, "PR-FIRST")
+
+        cache_path = project / ".neurograph" / "baseline.json"
+        self.assertTrue(cache_path.exists())
+        self.assertEqual(report.baseline_cache_path, str(cache_path))
+        self.assertFalse(report.snapshot_stale)
+        self.assertEqual(
+            report.snapshot["baseline_version"],
+            report.snapshot["current_baseline_version"],
+        )
+        self.assertTrue(
+            any("fresh baseline was created" in warning.lower() for warning in report.warnings)
+        )
+
+    def test_review_runner_uses_cached_baseline_and_marks_stale_overlay(self) -> None:
+        project = self._temp_path("stale-project")
+        baseline_diff = "\n".join(
+            [
+                "diff --git a/app.py b/app.py",
+                "--- a/app.py",
+                "+++ b/app.py",
+                "@@ -1,3 +1,3 @@",
+                "-def run(value):",
+                "+def run(value):",
+            ]
+        )
+        (project / "app.py").write_text(
+            "def run(value):\n    return helper(value)\n\ndef helper(value):\n    return value\n",
+            encoding="utf-8",
+        )
+        runner = ReviewRunner()
+        first = runner.run(project, baseline_diff, "PR-BASE")
+        self.assertFalse(first.snapshot_stale)
+
+        (project / "app.py").write_text(
+            "def run(value):\n    return value\n",
+            encoding="utf-8",
+        )
+        deletion_diff = "\n".join(
+            [
+                "diff --git a/app.py b/app.py",
+                "--- a/app.py",
+                "+++ b/app.py",
+                "@@ -1,4 +1,2 @@",
+                " def run(value):",
+                "-    return helper(value)",
+                "+    return value",
+                "-",
+                "-def helper(value):",
+                "-    return value",
+            ]
+        )
+
+        second = runner.run(project, deletion_diff, "PR-STALE")
+
+        self.assertTrue(second.snapshot_stale)
+        self.assertGreater(
+            second.snapshot["current_baseline_version"],
+            second.snapshot["baseline_version"],
+        )
+        self.assertGreaterEqual(len(second.overlay["deleted_node_ids"]), 1)
+        self.assertTrue(
+            any("loaded cached baseline graph" in warning.lower() for warning in second.warnings)
+        )
+        self.assertTrue(
+            any("stale compared with the live baseline sync" in warning.lower() for warning in second.warnings)
+        )
+        self.assertTrue(
+            any(finding.kind == "node-deleted-in-pr" for finding in second.findings)
+        )
+
     def test_render_review_report_html_contains_interactive_payload(self) -> None:
         project = self._temp_path("report-project")
         (project / "app.py").write_text("def run(value):\n    return value\n", encoding="utf-8")
@@ -194,6 +293,8 @@ class NeuroGraphPythonTests(unittest.TestCase):
         html = render_review_report_html(report)
         self.assertIn("NeuroGraph review for PR-HTML", html)
         self.assertIn("Interactive review output", html)
+        self.assertIn("Baseline cache", html)
+        self.assertIn("Overlay deletions", html)
         self.assertIn('"pr_identifier": "PR-HTML"', html)
 
     def test_cli_validate_config_outputs_json(self) -> None:
